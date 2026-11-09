@@ -16,12 +16,12 @@ public partial class MainWindow : Window
     private const string PresetFilter = "Presets de imagen|*.presets.json;*.json";
 
     private readonly ObservableCollection<Preset> presets = new();
+    private readonly Dictionary<string, BitmapSource> imageCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ViewAnimator editorAnimator;
     private readonly AppSettings settings = AppSettings.Load();
     private readonly List<MonitorInfo> monitors;
 
-    private BitmapSource? image;
-    private string? imagePath;
+    private string? editorImagePath;   // imagen que se ve (o se va a ver) en el editor
     private string? presentationPath;
     private OutputWindow? output;
     private int current = -1;
@@ -49,11 +49,12 @@ public partial class MainWindow : Window
         MonitorBox.SelectionChanged += MonitorBox_SelectionChanged;
         DurationSlider.ValueChanged += (_, _) => { UpdateSliderTexts(); MarkDirty(); };
         RhoSlider.ValueChanged += (_, _) => { UpdateSliderTexts(); MarkDirty(); };
+        FadeSlider.ValueChanged += (_, _) => { UpdateSliderTexts(); MarkDirty(); };
         UpdateSliderTexts();
 
         PreviewKeyDown += Window_PreviewKeyDown;
         Closing += Window_Closing;
-        Loaded += (_, _) => OpenLastPresentation();
+        Loaded += (_, _) => OpenStartupPresentation();
         UpdateTitle();
     }
 
@@ -61,18 +62,13 @@ public partial class MainWindow : Window
 
     // ───────────── Archivos ─────────────
 
-    private void OpenLastPresentation()
+    /// <summary>Abre el archivo pasado por la línea de órdenes o, si no hay, el último usado.</summary>
+    private void OpenStartupPresentation()
     {
-        var last = settings.LastPresentation;
-        if (string.IsNullOrEmpty(last) || !File.Exists(last)) return;
-        try
-        {
-            LoadPresentation(last);
-        }
-        catch (Exception ex)
-        {
-            ShowError("No se pudo abrir el último archivo de presets.", ex);
-        }
+        var args = Environment.GetCommandLineArgs();
+        string? path = args.Length > 1 ? args[1] : settings.LastPresentation;
+        if (string.IsNullOrEmpty(path) || !File.Exists(path)) return;
+        TryLoadPresentation(path, "No se pudo abrir el archivo de presets.");
     }
 
     private void OpenImage_Click(object sender, RoutedEventArgs e)
@@ -81,23 +77,23 @@ public partial class MainWindow : Window
         var dialog = new OpenFileDialog { Title = "Abrir imagen", Filter = ImageFilter };
         if (dialog.ShowDialog(this) != true) return;
 
+        // Si la imagen ya tiene presets guardados a su lado, se abren con ella
+        string sibling = PresentationData.DefaultPathFor(dialog.FileName);
+        if (File.Exists(sibling))
+        {
+            TryLoadPresentation(sibling, "No se pudo abrir el archivo de presets.");
+            return;
+        }
+
         try
         {
-            // Si la imagen ya tiene presets guardados a su lado, se abren con ella
-            string sibling = PresentationData.DefaultPathFor(dialog.FileName);
-            if (File.Exists(sibling))
-            {
-                LoadPresentation(sibling);
-                return;
-            }
-
-            var bmp = LoadBitmap(dialog.FileName);
+            imageCache.Clear();
+            var preset = NewFullPreset(dialog.FileName);
             loading = true;
-            SetImage(bmp, dialog.FileName);
             presets.Clear();
-            presets.Add(new Preset { Name = "Vista completa", View = ImageView.Fit(bmp, Aspect) });
-            RefreshThumbnails();
-            Editor.View = presets[0].View;
+            presets.Add(preset);
+            ShowInEditor(preset);
+            output?.Animator.Show(preset.Image!, preset.View);
             presentationPath = sibling;
             current = -1;
             loading = false;
@@ -110,58 +106,119 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>Añade otra imagen a la presentación, con un preset que la muestra entera.</summary>
+    private void AddImage_Click(object sender, RoutedEventArgs e)
+    {
+        if (Editor.Image == null)
+        {
+            OpenImage_Click(sender, e);
+            return;
+        }
+
+        var dialog = new OpenFileDialog { Title = "Añadir imagen", Filter = ImageFilter, Multiselect = true };
+        if (dialog.ShowDialog(this) != true) return;
+
+        try
+        {
+            int index = current >= 0 ? current + 1 : presets.Count;
+            int first = index;
+            foreach (var file in dialog.FileNames)
+                presets.Insert(index++, NewFullPreset(file));
+            MarkDirty();
+            GoTo(first);
+        }
+        catch (Exception ex)
+        {
+            ShowError("No se pudo abrir la imagen.", ex);
+        }
+    }
+
     private void OpenPresets_Click(object sender, RoutedEventArgs e)
     {
         if (!ConfirmDiscard()) return;
         var dialog = new OpenFileDialog { Title = "Abrir presets", Filter = PresetFilter };
         if (dialog.ShowDialog(this) != true) return;
+        TryLoadPresentation(dialog.FileName, "No se pudo abrir el archivo de presets.");
+    }
+
+    private void TryLoadPresentation(string path, string errorMessage)
+    {
         try
         {
-            LoadPresentation(dialog.FileName);
+            LoadPresentation(path);
+        }
+        catch (OperationCanceledException)
+        {
+            // El usuario no ha querido buscar una imagen que falta
         }
         catch (Exception ex)
         {
-            ShowError("No se pudo abrir el archivo de presets.", ex);
+            ShowError(errorMessage, ex);
         }
     }
 
     private void LoadPresentation(string jsonPath)
     {
         var data = PresentationData.Load(jsonPath);
-        string img = data.ResolveImage(jsonPath);
-        bool relocated = false;
+        var relocatedImages = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        if (!File.Exists(img))
+        // Ruta de cada imagen; si falta, se pide al usuario (una vez por imagen)
+        string Resolve(string? image)
         {
-            MessageBox.Show(this, $"No se encuentra la imagen:\n{img}\n\nElige dónde está.", "Imagen no encontrada",
+            string path = PresentationData.ResolvePath(jsonPath, string.IsNullOrEmpty(image) ? data.Image : image);
+            if (relocatedImages.TryGetValue(path, out var moved)) return moved;
+            if (File.Exists(path)) return path;
+
+            MessageBox.Show(this, $"No se encuentra la imagen:\n{path}\n\nElige dónde está.", "Imagen no encontrada",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
             var dialog = new OpenFileDialog { Title = "Buscar la imagen", Filter = ImageFilter };
-            if (dialog.ShowDialog(this) != true) return;
-            img = dialog.FileName;
-            relocated = true;
+            if (dialog.ShowDialog(this) != true) throw new OperationCanceledException();
+            relocatedImages[path] = dialog.FileName;
+            return dialog.FileName;
         }
 
-        var bmp = LoadBitmap(img);
+        imageCache.Clear();
+        var loaded = new List<Preset>();
+        foreach (var p in data.Presets)
+        {
+            string path = Resolve(p.Image);
+            var bmp = GetImage(path);
+            loaded.Add(new Preset
+            {
+                Name = p.Name,
+                ImagePath = path,
+                Image = bmp,
+                View = new View(p.X * bmp.PixelWidth, p.Y * bmp.PixelHeight, p.Width * bmp.PixelWidth),
+            });
+        }
+        // Un archivo sin presets todavía tiene su imagen general
+        string? emptyImage = loaded.Count == 0 && !string.IsNullOrEmpty(data.Image) ? Resolve(null) : null;
+
         loading = true;
         try
         {
-            SetImage(bmp, img);
             presets.Clear();
-            foreach (var p in data.Presets)
-            {
-                presets.Add(new Preset
-                {
-                    Name = p.Name,
-                    View = new View(p.X * bmp.PixelWidth, p.Y * bmp.PixelHeight, p.Width * bmp.PixelWidth),
-                });
-            }
+            foreach (var p in loaded) presets.Add(p);
             DurationSlider.Value = data.Duration;
             RhoSlider.Value = data.Rho;
+            FadeSlider.Value = data.Fade;
             RefreshThumbnails();
-            Editor.View = presets.Count > 0 ? presets[0].View : ImageView.Fit(bmp, Aspect);
+
+            if (loaded.Count > 0)
+            {
+                ShowInEditor(loaded[0]);
+            }
+            else if (emptyImage != null)
+            {
+                var bmp = GetImage(emptyImage);
+                editorAnimator.Show(bmp, ImageView.Fit(bmp, Aspect));
+                editorImagePath = emptyImage;
+            }
+            if (Editor.Image != null) output?.Animator.Show(Editor.Image, Editor.View);
+
             presentationPath = jsonPath;
             current = -1;
-            dirty = relocated;
+            dirty = relocatedImages.Count > 0;
         }
         finally
         {
@@ -181,32 +238,36 @@ public partial class MainWindow : Window
 
     private bool SaveAs()
     {
-        if (image == null || imagePath == null) return false;
+        string? baseImage = presets.Count > 0 ? presets[0].ImagePath : editorImagePath;
+        if (baseImage == null) return false;
         var dialog = new SaveFileDialog
         {
             Title = "Guardar presets",
             Filter = PresetFilter,
-            FileName = Path.GetFileName(presentationPath ?? PresentationData.DefaultPathFor(imagePath)),
-            InitialDirectory = Path.GetDirectoryName(presentationPath ?? imagePath),
+            FileName = Path.GetFileName(presentationPath ?? PresentationData.DefaultPathFor(baseImage)),
+            InitialDirectory = Path.GetDirectoryName(presentationPath ?? baseImage),
         };
         return dialog.ShowDialog(this) == true && SaveTo(dialog.FileName);
     }
 
     private bool SaveTo(string path)
     {
-        if (image == null || imagePath == null) return false;
-        double w = image.PixelWidth, h = image.PixelHeight;
+        string? baseImage = presets.Count > 0 ? presets[0].ImagePath : editorImagePath;
+        if (baseImage == null) return false;
+
         var data = new PresentationData
         {
-            Image = PresentationData.RelativeImagePath(path, imagePath),
+            Image = PresentationData.RelativeImagePath(path, baseImage),
             Duration = Math.Round(DurationSlider.Value, 2),
             Rho = Math.Round(RhoSlider.Value, 2),
+            Fade = Math.Round(FadeSlider.Value, 2),
             Presets = presets.Select(p => new PresetData
             {
                 Name = p.Name,
-                X = Math.Round(p.View.X / w, 6),
-                Y = Math.Round(p.View.Y / h, 6),
-                Width = Math.Round(p.View.W / w, 6),
+                Image = PresentationData.RelativeImagePath(path, p.ImagePath),
+                X = Math.Round(p.View.X / p.Image!.PixelWidth, 6),
+                Y = Math.Round(p.View.Y / p.Image.PixelHeight, 6),
+                Width = Math.Round(p.View.W / p.Image.PixelWidth, 6),
             }).ToList(),
         };
 
@@ -228,38 +289,55 @@ public partial class MainWindow : Window
         return true;
     }
 
-    private static BitmapSource LoadBitmap(string path)
+    /// <summary>Carga una imagen (o la devuelve si ya estaba cargada).</summary>
+    private BitmapSource GetImage(string path)
     {
+        if (imageCache.TryGetValue(path, out var cached)) return cached;
         var bmp = new BitmapImage();
         bmp.BeginInit();
         bmp.UriSource = new Uri(path);
         bmp.CacheOption = BitmapCacheOption.OnLoad;   // no deja el archivo bloqueado
         bmp.EndInit();
         bmp.Freeze();
+        imageCache[path] = bmp;
         return bmp;
-    }
-
-    private void SetImage(BitmapSource bmp, string path)
-    {
-        image = bmp;
-        imagePath = path;
-        Editor.Image = bmp;
-        editorAnimator.Stop();
-        if (output != null)
-        {
-            output.Animator.Stop();
-            output.ImageView.Image = bmp;
-            output.ImageView.View = ImageView.Fit(bmp, output.Monitor.Aspect);
-        }
     }
 
     // ───────────── Presets ─────────────
 
+    /// <summary>Preset nuevo que muestra la imagen entera, con el nombre del archivo.</summary>
+    private Preset NewFullPreset(string imagePath)
+    {
+        var bmp = GetImage(imagePath);
+        var preset = new Preset
+        {
+            Name = Path.GetFileNameWithoutExtension(imagePath),
+            ImagePath = imagePath,
+            Image = bmp,
+            View = ImageView.Fit(bmp, Aspect),
+        };
+        preset.Thumbnail = MakeThumbnail(preset);
+        return preset;
+    }
+
+    private void ShowInEditor(Preset preset)
+    {
+        editorAnimator.Show(preset.Image!, preset.View);
+        editorImagePath = preset.ImagePath;
+        UpdateTitle();
+    }
+
     private void Add_Click(object sender, RoutedEventArgs e)
     {
-        if (image == null) return;
-        var preset = new Preset { Name = $"Preset {presets.Count + 1}", View = Editor.View };
-        preset.Thumbnail = MakeThumbnail(preset.View);
+        if (Editor.Image == null || editorImagePath == null) return;
+        var preset = new Preset
+        {
+            Name = $"Preset {presets.Count + 1}",
+            ImagePath = editorImagePath,
+            Image = Editor.Image,
+            View = Editor.View,
+        };
+        preset.Thumbnail = MakeThumbnail(preset);
         int index = current >= 0 ? current + 1 : presets.Count;
         presets.Insert(index, preset);
         Select(index);
@@ -268,9 +346,11 @@ public partial class MainWindow : Window
 
     private void Update_Click(object sender, RoutedEventArgs e)
     {
-        if (PresetList.SelectedItem is not Preset preset) return;
+        if (PresetList.SelectedItem is not Preset preset || Editor.Image == null || editorImagePath == null) return;
+        preset.ImagePath = editorImagePath;
+        preset.Image = Editor.Image;
         preset.View = Editor.View;
-        preset.Thumbnail = MakeThumbnail(preset.View);
+        preset.Thumbnail = MakeThumbnail(preset);
         MarkDirty();
     }
 
@@ -304,14 +384,19 @@ public partial class MainWindow : Window
         if (index >= 0) PresetList.ScrollIntoView(presets[index]);
     }
 
-    /// <summary>Viaja al preset en el editor y, si se está proyectando, también en la salida.</summary>
+    /// <summary>
+    /// Va al preset en el editor y, si se está proyectando, también en la salida: con un viaje de zoom
+    /// si es la misma imagen o con un fundido a negro si es otra.
+    /// </summary>
     private void GoTo(int index)
     {
         if (index < 0 || index >= presets.Count) return;
         Select(index);
-        var view = presets[index].View;
-        editorAnimator.Start(view, DurationSlider.Value, RhoSlider.Value);
-        output?.Animator.Start(view, DurationSlider.Value, RhoSlider.Value);
+        var p = presets[index];
+        editorAnimator.GoTo(p.Image!, p.View, DurationSlider.Value, RhoSlider.Value, FadeSlider.Value);
+        output?.Animator.GoTo(p.Image!, p.View, DurationSlider.Value, RhoSlider.Value, FadeSlider.Value);
+        editorImagePath = p.ImagePath;
+        UpdateTitle();
     }
 
     private void PresetList_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
@@ -331,6 +416,7 @@ public partial class MainWindow : Window
                 p.PropertyChanged -= Preset_PropertyChanged;
         for (int i = 0; i < presets.Count; i++)
             presets[i].Number = i + 1;
+        UpdateTitle();
     }
 
     private void Preset_PropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -341,13 +427,15 @@ public partial class MainWindow : Window
     private void RefreshThumbnails()
     {
         foreach (var p in presets)
-            p.Thumbnail = MakeThumbnail(p.View);
+            p.Thumbnail = MakeThumbnail(p);
     }
 
     /// <summary>Miniatura del encuadre (con negro donde se sale de la imagen).</summary>
-    private ImageSource? MakeThumbnail(View v)
+    private ImageSource? MakeThumbnail(Preset preset)
     {
+        var image = preset.Image;
         if (image == null) return null;
+        var v = preset.View;
         double h = v.W / Aspect;
         var frame = new Rect(v.X - v.W / 2, v.Y - h / 2, v.W, h);
         var group = new DrawingGroup { ClipGeometry = new RectangleGeometry(frame) };
@@ -369,9 +457,22 @@ public partial class MainWindow : Window
             output.Close();
             return;
         }
-        if (image == null || MonitorBox.SelectedItem is not MonitorInfo monitor) return;
+        if (MonitorBox.SelectedItem is not MonitorInfo monitor) return;
 
-        var view = current >= 0 && current < presets.Count ? presets[current].View : Editor.View;
+        BitmapSource? image;
+        View view;
+        if (current >= 0 && current < presets.Count)
+        {
+            image = presets[current].Image;
+            view = presets[current].View;
+        }
+        else
+        {
+            image = Editor.Image;
+            view = Editor.View;
+        }
+        if (image == null) return;
+
         output = new OutputWindow(monitor, image, view);
         output.KeyPressed += e => { if (HandleKey(e.Key)) e.Handled = true; };
         output.Closed += (_, _) =>
@@ -480,7 +581,7 @@ public partial class MainWindow : Window
 
     private void MarkDirty()
     {
-        if (loading || image == null) return;
+        if (loading || Editor.Image == null) return;
         dirty = true;
         UpdateTitle();
     }
@@ -489,15 +590,22 @@ public partial class MainWindow : Window
     {
         string name = presentationPath != null ? Path.GetFileName(presentationPath) : "Sin archivo";
         Title = $"{name}{(dirty ? " *" : "")} — Presets de imagen";
-        FileText.Text = imagePath != null && image != null
-            ? $"{Path.GetFileName(imagePath)} · {image.PixelWidth}×{image.PixelHeight}"
-            : "";
+
+        if (editorImagePath == null || !imageCache.TryGetValue(editorImagePath, out var image))
+        {
+            FileText.Text = "";
+            return;
+        }
+        int imageCount = presets.Select(p => p.ImagePath).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        FileText.Text = $"{Path.GetFileName(editorImagePath)} · {image.PixelWidth}×{image.PixelHeight}"
+            + (imageCount > 1 ? $" · {imageCount} imágenes" : "");
     }
 
     private void UpdateSliderTexts()
     {
         DurationText.Text = $"{DurationSlider.Value:0.0} s";
         RhoText.Text = $"{RhoSlider.Value:0.0}";
+        FadeText.Text = FadeSlider.Value < 0.05 ? "corte" : $"{FadeSlider.Value:0.0} s";
     }
 
     /// <summary>Si hay cambios sin guardar, pregunta. Devuelve false si el usuario cancela.</summary>

@@ -1,7 +1,8 @@
 # Presets de imagen
 
-Programa para recorrer una imagen con encuadres guardados (presets) y proyectarla en un segundo monitor con
-transiciones suaves: se aleja, viaja y se vuelve a acercar (curva de van Wijk y Nuij).
+Programa para recorrer una o varias imágenes con encuadres guardados (presets) y proyectarlas en un segundo monitor
+con transiciones suaves: dentro de una imagen se aleja, viaja y se vuelve a acercar (curva de van Wijk y Nuij);
+entre imágenes distintas funde a negro y vuelve.
 
 C# / WPF sobre .NET 9. Sin dependencias externas.
 
@@ -19,7 +20,9 @@ dotnet publish C:\GitHub\ImagePresets -c Release -r win-x64 --self-contained -p:
 
 ## Uso
 
-1. **Abrir imagen…**: carga la imagen. Si a su lado existe `nombre.presets.json`, se abre con sus presets.
+1. **Abrir imagen…**: empieza una presentación con la imagen. Si a su lado existe `nombre.presets.json`, se abre
+   con sus presets. **＋ Imagen…** añade más imágenes a la presentación (cada una con un preset que la muestra
+   entera); cada preset recuerda su imagen y el editor muestra la del preset elegido.
 2. Encuadra en el editor: **rueda** para el zoom, **arrastrar** para mover. El **marco amarillo** es exactamente lo
    que se verá en el monitor de salida (tiene su proporción).
 3. **＋ Añadir** guarda el encuadre como preset; **Actualizar** sustituye el seleccionado. El nombre se edita en la
@@ -33,18 +36,28 @@ Durante la proyección: clic en un preset, `→` `↓` `AvPág` `Espacio` (sigui
 
 - **Duración**: lo que tardan los viajes largos (los cortos tardan menos).
 - **Alejamiento**: cuánto se aleja la cámara al viajar (1,4 es el valor clásico).
+- **Fundido**: segundos del fundido a negro al cambiar de imagen, y otros tantos para volver (0 = corte directo).
+
+También se puede abrir un archivo de presets al arrancar: `ImagePresets.exe ruta\archivo.presets.json`.
 
 ## Archivo de presets
 
 Las posiciones se guardan normalizadas (0–1 respecto al ancho y alto de la imagen): si cambias la imagen por otra
 versión con más resolución de la misma obra, los presets siguen valiendo.
 
+Las rutas de las imágenes se guardan relativas al archivo cuando están en su carpeta (o debajo). Un preset sin
+`image` usa la imagen general (así se leen también los archivos de la versión 1.0).
+
 ```json
 {
   "image": "Tríptico del Jardín de las delicias.jpg",
   "duration": 3,
   "rho": 1.4,
-  "presets": [ { "name": "Vista completa", "x": 0.5, "y": 0.5, "width": 1 } ]
+  "fade": 0.6,
+  "presets": [
+    { "name": "Vista completa", "image": "Tríptico del Jardín de las delicias.jpg", "x": 0.5, "y": 0.5, "width": 1 },
+    { "name": "Otra obra", "image": "otra.jpg", "x": 0.5, "y": 0.5, "width": 1 }
+  ]
 }
 ```
 
@@ -53,6 +66,7 @@ versión con más resolución de la misma obra, los presets siguen valiendo.
 - `MainWindow` — editor, lista de presets, archivos y teclado.
 - `OutputWindow` — ventana de proyección a pantalla completa en el monitor elegido.
 - `ImageView` — dibuja la imagen con un encuadre; en modo editor, marco, zoom y arrastre.
-- `ZoomPath` — curva óptima de zoom y desplazamiento; `ViewAnimator` la recorre con arranque y frenada suaves.
+- `ZoomPath` — curva óptima de zoom y desplazamiento.
+- `ViewAnimator` — recorre esa curva con arranque y frenada suaves, o funde a negro si cambia la imagen.
 - `Presentation` — preset, archivo JSON y preferencias (`%AppData%\ImagePresets\settings.json`).
 - `Monitors` — monitores y colocación de ventanas con la API de Windows.

@@ -14,7 +14,10 @@
 
         <!-- Barra superior -->
         <WrapPanel Grid.Row="0" Margin="10,8,10,8">
-            <Button Content="Abrir imagen…" Click="OpenImage_Click" Margin="0,0,6,4"/>
+            <Button Content="Abrir imagen…" Click="OpenImage_Click" Margin="0,0,6,4"
+                    ToolTip="Empieza una presentación nueva con esta imagen"/>
+            <Button Content="＋ Imagen…" Click="AddImage_Click" Margin="0,0,6,4"
+                    ToolTip="Añade otra imagen a la presentación (se pasa a ella con un fundido)"/>
             <Button Content="Abrir presets…" Click="OpenPresets_Click" Margin="0,0,6,4"/>
             <Button Content="Guardar" Click="Save_Click" Margin="0,0,6,4" ToolTip="Ctrl+S"/>
             <Button Content="Guardar como…" Click="SaveAs_Click" Margin="0,0,24,4"/>
@@ -33,7 +36,13 @@
             <Slider x:Name="RhoSlider" Width="130" Minimum="0.6" Maximum="2.6" Value="1.4"
                     VerticalAlignment="Center" Margin="0,0,4,4" Focusable="False"
                     ToolTip="Cuánto se aleja la cámara al viajar entre presets"/>
-            <TextBlock x:Name="RhoText" Width="36" VerticalAlignment="Center" Margin="0,0,0,4"/>
+            <TextBlock x:Name="RhoText" Width="36" VerticalAlignment="Center" Margin="0,0,16,4"/>
+
+            <TextBlock Text="Fundido" VerticalAlignment="Center" Margin="0,0,6,4"/>
+            <Slider x:Name="FadeSlider" Width="110" Minimum="0" Maximum="3" Value="0.6"
+                    VerticalAlignment="Center" Margin="0,0,4,4" Focusable="False"
+                    ToolTip="Segundos del fundido a negro al cambiar de imagen (0 = corte directo)"/>
+            <TextBlock x:Name="FadeText" Width="44" VerticalAlignment="Center" Margin="0,0,0,4"/>
         </WrapPanel>
 
         <Grid Grid.Row="1">
